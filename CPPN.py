@@ -4,16 +4,17 @@ import Helpers as hp
 import math
 
 
-image_name = 'test'
+image_name = 'test/test'
 
 # Model parameters
-x_dim = 1366
-y_dim = 768
+x_dim = 2560
+y_dim = 1440
 z_dim = 1
-scale = 30.0
-layer_sizes = [32, 32, 32]
+scale = 10.0
+num_layers = 9
+layer_size = 17
 stddev = 1.0
-rgb = True
+rgb = False
 activation = tf.nn.tanh
 
 
@@ -44,11 +45,14 @@ def construct_input(x_dim, y_dim, z_dim, scale):
 inputs = construct_input(x_dim, y_dim, z_dim, scale)
 
 # Construct model
-cppn = inputs
-for i, size in enumerate(layer_sizes):
-    cppn = hp.fully_connected(cppn, size, name='layer_'+str(i), stddev=stddev, activation=activation)
+cppn = hp.fully_connected(inputs, layer_size, name='layer_0',
+                          bias=False, stddev=stddev, activation=tf.nn.tanh)
+for i in range(num_layers):
+    cppn = hp.fully_connected(cppn, layer_size, name='layer_'+str(i+1),
+                              stddev=stddev, activation=activation)
 channels = 3 if rgb else 1
-cppn = hp.fully_connected(cppn, channels, name='output', stddev=stddev, activation=tf.nn.sigmoid)
+cppn = hp.fully_connected(cppn, channels, name='output',
+                          stddev=stddev, activation=tf.nn.sigmoid)
 if rgb:
     cppn = tf.reshape(cppn, [x_dim, y_dim, 3])
 else:
