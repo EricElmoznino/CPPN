@@ -1,68 +1,81 @@
-import tensorflow as tf
+import torch
+import torch.nn as nn
+from torch.autograd import Variable
+from torchvision.transforms import functional as tr
 import numpy as np
-import Helpers as hp
-import math
 
 
-image_name = 'test/test'
+class CPPN(nn.Module):
 
-# Model parameters
-x_dim = 2560
-y_dim = 1440
-z_dim = 1
-scale = 10.0
-num_layers = 9
-layer_size = 17
-stddev = 1.0
-rgb = False
-activation = tf.nn.tanh
+    def __init__(self, resolution, rgb, z_dim, z_scale, n_layers, layer_sizes, activations, initialization):
+        super().__init__()
+        self.eval()
 
+        if type(layer_sizes) == list:
+            assert  n_layers == len(layer_sizes)
+        else:
+            layer_sizes = [layer_sizes for _ in range(n_layers)]
+        if type(activations) == list:
+            assert n_layers == len(activations)
+        else:
+            activations = [activations for _ in range(n_layers)]
 
-def construct_input(x_dim, y_dim, z_dim, scale):
-    x = []
-    y = []
-    r = []
-    for _x in range(x_dim):
-        x_coord = (_x / (x_dim - 1) - 0.5) * 2 * scale
-        for _y in range(y_dim):
-            y_coord = (_y / (y_dim - 1) - 0.5) * 2 * scale
-            r_coord = math.sqrt(x_coord ** 2 + y_coord ** 2)
-            x.append(x_coord)
-            y.append(y_coord)
-            r.append(r_coord)
-    x = tf.constant(x, name='x')
-    y = tf.constant(y, name='y')
-    r = tf.constant(r, name='r')
-    coords = tf.stack([x, y, r], axis=1, name='coords')
+        self.resolution = resolution
+        self.rgb = rgb
+        self.z_dim = z_dim
+        self.z_scale = z_scale
+        self.coordinates = self.generate_coordinates()
 
-    z = np.random.uniform(-1.0, 1.0, size=(z_dim)).astype(np.float32) * scale
-    z = np.reshape(np.tile(z, x_dim * y_dim), (x_dim * y_dim, z_dim))
-    z = tf.constant(z, name='z')
+        layers = [nn.Linear(3 + z_dim, layer_sizes[0], bias=False), activations[0]]
+        for i in range(1, n_layers):
+            layers += [nn.Linear(layer_sizes[i - 1], layer_sizes[i]), activations[i]]
+        layers += [nn.Linear(layer_sizes[-1], 3 if rgb else 1), nn.Sigmoid()]
+        self.layers = nn.Sequential(*layers)
 
-    inputs = tf.concat([z, coords], 1)
-    return inputs
+        self.initialize_params(initialization)
 
-inputs = construct_input(x_dim, y_dim, z_dim, scale)
+    def forward(self, z):
+        inputs = np.hstack([self.coordinates, z])
+        inputs = torch.from_numpy(inputs)
+        inputs = Variable(inputs, requires_grad=False, volatile=True)
+        pixels = self.layers(inputs)
+        if self.rgb:
+            pixels = pixels.view(self.resolution[0], self.resolution[1], 3)
+        else:
+            pixels = pixels.view(self.resolution[0], self.resolution[1])
+        pixels = pixels.data
+        return pixels
 
-# Construct model
-cppn = hp.fully_connected(inputs, layer_size, name='layer_0',
-                          bias=False, stddev=stddev, activation=tf.nn.tanh)
-for i in range(num_layers):
-    cppn = hp.fully_connected(cppn, layer_size, name='layer_'+str(i+1),
-                              stddev=stddev, activation=activation)
-channels = 3 if rgb else 1
-cppn = hp.fully_connected(cppn, channels, name='output',
-                          stddev=stddev, activation=tf.nn.sigmoid)
-if rgb:
-    cppn = tf.reshape(cppn, [x_dim, y_dim, 3])
-else:
-    cppn = tf.reshape(cppn, [x_dim, y_dim])
+    def image(self):
+        z = self.random_z()
+        image = self.forward(z)
+        image = image.permute(2, 0, 1)
+        image = tr.to_pil_image(image)
+        return image
 
-# Run model
-with tf.Session() as sess:
-    sess.run(tf.global_variables_initializer())
-    im = sess.run(cppn)
+    def video(self, n_frames, z_speeds):
+        pass
 
-# Save the image
-hp.save_image(im, image_name)
+    def generate_coordinates(self):
+        y = np.linspace(-self.z_scale, self.z_scale, self.resolution[0])
+        x = np.linspace(-self.z_scale, self.z_scale, self.resolution[1])
+        xx, yy = np.meshgrid(x, y)
+        xx, yy = xx.flatten(), yy.flatten()
+        coordinates = np.vstack([yy, xx]).transpose()
+        r = np.linalg.norm(coordinates, axis=1)[:, np.newaxis]
+        coordinates = np.hstack([coordinates, r])
+        return coordinates.astype(np.float32)
 
+    def random_z(self):
+        z = np.random.uniform(-self.z_scale, self.z_scale, size=self.z_dim)
+        z = np.reshape(np.tile(z, self.resolution[0] * self.resolution[1]),
+                       [self.resolution[0] * self.resolution[1], self.z_dim])
+        return z.astype(np.float32)
+
+    def initialize_params(self, initialization):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                if initialization['type'] == 'normal':
+                    m.weight.data.normal_(std=initialization['stddev'])
+                    if m.bias is not None:
+                        m.bias.data.normal_(initialization['stddev'])
